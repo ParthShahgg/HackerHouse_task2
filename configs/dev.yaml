@@ -1,0 +1,37 @@
+# ===========================================================================
+# DEV profile - smallest corpus that still exercises every code path.
+# Select with INGEST_MODE=dev. Values here are overridden by .env / real env.
+#
+# Purpose: fast local iteration. Two Devanagari languages only, so a full
+# rebuild finishes in minutes on CPU.
+# ===========================================================================
+
+dataset:
+  dataset_id: ai4bharat/MSMARCO-XI
+  # `validation` rather than `train`: the validation shards are ~460MB each vs
+  # ~3.7GB, and - critically - validation is the ONLY split that contains
+  # Telugu upstream. See app/languages.py.
+  dataset_split: validation
+  languages: hi,mr
+  max_rows_per_language: 200
+
+qdrant:
+  qdrant_collection: msmarco_xi_dev
+
+chunking:
+  index_strategies: native,sentence_window,semantic_split,fixed_fallback
+
+retrieval:
+  dense_top_k: 20
+  sparse_top_k: 20
+  rrf_top_k: 20
+  rerank_top_k: 20
+  final_top_k: 5
+
+models:
+  # Small batches keep peak RAM low on a laptop.
+  embed_batch_size: 8
+  rerank_batch_size: 8
+
+guardrails:
+  enable_nli_grounding: true

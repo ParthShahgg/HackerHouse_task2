@@ -1,0 +1,50 @@
+# ===========================================================================
+# FULL_OFFLINE profile - large-scale ingestion of the selected language files.
+# Select with INGEST_MODE=full.
+#
+# READ THIS BEFORE RUNNING:
+#   * MSMARCO-XI is ~11.45M rows / 55.6GB across all shards.
+#   * `train/` is ~3.7GB PER LANGUAGE (13 languages).
+#   * This profile still STREAMS parquet row groups, so peak RAM stays bounded,
+#     but embedding tens of millions of passages is a GPU-scale job. On CPU it
+#     is not practical - see README "Corpus modes" for measured throughput.
+#   * Telugu is absent from `train/` upstream; ingest it from `validation`.
+#
+# Recommended usage: run per-language with an explicit row cap, e.g.
+#   python scripts/build_index.py --mode full --languages hi --max-rows-per-language 500000
+# ===========================================================================
+
+dataset:
+  dataset_id: ai4bharat/MSMARCO-XI
+  dataset_split: train
+  # All 13 languages that actually have a train shard (Telugu excluded - it has
+  # no train file upstream; ingest it separately from validation).
+  languages: as,bn,gu,hi,kn,ml,mr,ne,or,pa,sa,ta,ur
+  # null => no cap, stream the entire shard.
+  max_rows_per_language: null
+
+qdrant:
+  qdrant_collection: msmarco_xi_full
+  qdrant_timeout_s: 60.0
+
+chunking:
+  # At full scale, sentence-window children roughly double the vector count.
+  # Keep them (they measurably help precision - see reports/chunking_eval.md)
+  # but drop them here if index size is the binding constraint.
+  index_strategies: native,sentence_window,semantic_split,fixed_fallback
+
+retrieval:
+  dense_top_k: 50
+  sparse_top_k: 50
+  rrf_top_k: 50
+  rerank_top_k: 30
+  final_top_k: 5
+  enable_parent_expansion: true
+
+models:
+  # Assumes GPU. Lower these if you see OOM.
+  embed_batch_size: 64
+  rerank_batch_size: 64
+
+guardrails:
+  enable_nli_grounding: true

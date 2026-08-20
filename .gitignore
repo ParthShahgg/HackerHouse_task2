@@ -1,0 +1,50 @@
+# ---- secrets ----
+.env
+.env.local
+*.pem
+*.key
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# ---- local model / dataset caches (multi-GB) ----
+.cache/
+.hf_cache/
+.qdrant_storage/
+
+# ---- generated corpus + eval artifacts ----
+data/corpus/
+data/eval/
+data/audio/
+*.parquet
+!configs/**/*.parquet
+
+# ---- node / frontend ----
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ---- os / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ---- logs ----
+logs/
+*.log

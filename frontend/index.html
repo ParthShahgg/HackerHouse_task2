@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voice RAG · MSMARCO-XI</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo" aria-hidden="true">◑</span>
+            <div>
+                <h1>Voice RAG</h1>
+                <p class="sub">Grounded multilingual retrieval over <code>ai4bharat/MSMARCO-XI</code></p>
+            </div>
+        </div>
+        <div class="status-cluster">
+            <span id="health-pill" class="pill pill-muted" role="status" aria-live="polite">checking…</span>
+            <button id="debug-toggle" class="btn btn-ghost" aria-expanded="false" aria-controls="debug-drawer">
+                Developer
+            </button>
+        </div>
+    </header>
+
+    <main id="main">
+        <!-- ── Ask ─────────────────────────────────────────────── -->
+        <section class="card" aria-labelledby="ask-h">
+            <h2 id="ask-h">Ask a question</h2>
+
+            <div class="mic-row">
+                <button id="mic-btn" class="mic" aria-label="Start recording">
+                    <span class="mic-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" focusable="false">
+                            <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" />
+                            <path d="M17.3 12a5.3 5.3 0 0 1-10.6 0H5a7 7 0 0 0 6 6.9V22h2v-3.1A7 7 0 0 0 19 12z" />
+                        </svg>
+                    </span>
+                    <span id="mic-label">Hold to speak</span>
+                </button>
+
+                <div class="mic-meta">
+                    <div id="rec-state" class="rec-state" role="status" aria-live="polite">Idle</div>
+                    <div class="level-track" aria-hidden="true">
+                        <div id="level-bar" class="level-bar"></div>
+                    </div>
+                    <label class="lang-select">
+                        <span>Language</span>
+                        <select id="lang-select">
+                            <option value="">Auto-detect</option>
+                            <option value="hi">Hindi</option>
+                            <option value="mr">Marathi</option>
+                            <option value="ta">Tamil</option>
+                            <option value="te">Telugu</option>
+                            <option value="en">English</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+
+            <div id="mic-warning" class="notice notice-warn" hidden></div>
+
+            <div class="divider"><span>or type</span></div>
+
+            <form id="text-form" class="text-row">
+                <label class="sr-only" for="text-input">Your question</label>
+                <input id="text-input" type="text" autocomplete="off" placeholder="कॉर्पोरेशन क्या है?  /  महामंडळ काय आहे?  /  What is a corporation?" />
+                <button id="send-btn" class="btn btn-primary" type="submit">Ask</button>
+            </form>
+
+            <div class="examples" aria-label="Example questions">
+                <button class="chip" data-lang="hi">कॉर्पोरेशन क्या है?</button>
+                <button class="chip" data-lang="mr">महामंडळ काय आहे?</button>
+                <button class="chip" data-lang="ta">நிறுவனம் என்றால் என்ன?</button>
+                <button class="chip" data-lang="te">కార్పొరేషన్ అంటే ఏమిటి?</button>
+                <button class="chip" data-lang="">Who won the 2027 Mars marathon?</button>
+            </div>
+        </section>
+
+        <!-- ── Transcript ───────────────────────────────────────── -->
+        <section id="transcript-card" class="card" aria-labelledby="tr-h" hidden>
+            <div class="card-head">
+                <h2 id="tr-h">Transcript</h2>
+                <span id="lang-badge" class="pill pill-info" hidden></span>
+            </div>
+            <p id="transcript" class="transcript" aria-live="polite"></p>
+        </section>
+
+        <!-- ── Answer ───────────────────────────────────────────── -->
+        <section id="answer-card" class="card" aria-labelledby="ans-h" hidden>
+            <div class="card-head">
+                <h2 id="ans-h">Answer</h2>
+                <div class="badges">
+                    <span id="grounded-badge" class="pill" hidden></span>
+                    <span id="latency-badge" class="pill pill-muted" hidden title="Transcript received → validated answer"></span>
+                </div>
+            </div>
+
+            <div id="abstain-note" class="notice notice-abstain" hidden>
+                <strong>No answer given.</strong>
+                <span id="abstain-reason"></span>
+            </div>
+
+            <p id="answer" class="answer" aria-live="polite"></p>
+
+            <div id="sources-block" hidden>
+                <h3 class="sources-h">Sources <span id="sources-count" class="muted"></span></h3>
+                <ol id="sources" class="sources"></ol>
+            </div>
+
+            <div class="feedback" id="feedback" hidden>
+                <span class="muted">Was this useful?</span>
+                <button class="btn btn-ghost" data-rating="up" aria-label="Helpful">👍</button>
+                <button class="btn btn-ghost" data-rating="down" aria-label="Not helpful">👎</button>
+                <span id="feedback-ack" class="muted" aria-live="polite"></span>
+            </div>
+        </section>
+
+        <div id="error-box" class="notice notice-error" hidden role="alert"></div>
+    </main>
+
+    <!-- ── Developer drawer ───────────────────────────────────── -->
+    <aside id="debug-drawer" class="drawer" aria-label="Developer details" hidden>
+        <div class="drawer-head">
+            <h2>Developer</h2>
+            <button id="debug-close" class="btn btn-ghost" aria-label="Close developer panel">✕</button>
+        </div>
+
+        <div class="drawer-body">
+            <dl class="kv">
+                <dt>Trace ID</dt>
+                <dd id="d-trace" class="mono">—</dd>
+                <dt>Detected language</dt>
+                <dd id="d-lang">—</dd>
+                <dt>Lang confidence</dt>
+                <dd id="d-conf">—</dd>
+                <dt>Code-mixed</dt>
+                <dd id="d-mixed">—</dd>
+                <dt>Retrieval mode</dt>
+                <dd id="d-mode">—</dd>
+                <dt>Languages searched</dt>
+                <dd id="d-langs">—</dd>
+                <dt>Normalized query</dt>
+                <dd id="d-nq" class="mono wrap">—</dd>
+                <dt>Gate top score</dt>
+                <dd id="d-top">—</dd>
+                <dt>Gate margin</dt>
+                <dd id="d-margin">—</dd>
+                <dt>Gate threshold</dt>
+                <dd id="d-thresh">—</dd>
+                <dt>Grounding</dt>
+                <dd id="d-ground">—</dd>
+                <dt>Generation model</dt>
+                <dd id="d-genmodel" class="mono">—</dd>
+                <dt>Corpus mode</dt>
+                <dd id="d-corpus">—</dd>
+            </dl>
+
+            <div id="d-warnbox" hidden>
+                <h3>Warnings</h3>
+                <ul id="d-warnings" class="warnlist"></ul>
+            </div>
+
+            <h3>Stage timings (ms)</h3>
+            <table class="tbl">
+                <tbody id="d-timings"></tbody>
+            </table>
+            <p class="muted small"><code>n/a</code> = not measured (never rendered as 0).</p>
+
+            <h3>Pipeline path</h3>
+            <div id="d-path" class="path"></div>
+
+            <h3>Candidates <span class="muted small">(reranker scores)</span></h3>
+            <div class="tbl-wrap">
+                <table class="tbl">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>chunk_id</th>
+                            <th>strat</th>
+                            <th>dense</th>
+                            <th>sparse</th>
+                            <th>rrf</th>
+                            <th>rerank</th>
+                        </tr>
+                    </thead>
+                    <tbody id="d-cands"></tbody>
+                </table>
+            </div>
+
+            <h3>Selected chunks</h3>
+            <ul id="d-selected" class="mono small selected-list"></ul>
+        </div>
+    </aside>
+
+    <footer class="foot">
+        <span id="foot-info">—</span>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>

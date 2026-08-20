@@ -1,0 +1,67 @@
+{
+  "calibrated": true,
+  "source": "scripts/calibrate_thresholds.py @ 2026-08-20T02:10:40",
+  "rerank_abstain_below": 6.38,
+  "rerank_margin_min": 0.018,
+  "margin_override_score": 10.38,
+  "objective": "lowest threshold with precision >= 0.85",
+  "requested_target_precision": 0.85,
+  "precision_floor_met": true,
+  "label_definition": "a gold (is_selected) passage appears within the top FINAL_TOP_K reranked candidates - i.e. in the context the generator receives",
+  "chosen_operating_point": {
+    "threshold": 6.38,
+    "tp": 8,
+    "fp": 1,
+    "fn": 27,
+    "tn": 72,
+    "precision": 0.8889,
+    "recall": 0.2286,
+    "f1": 0.3636,
+    "youden_j": 0.2149
+  },
+  "best_f1_operating_point": {
+    "threshold": -0.978,
+    "tp": 31,
+    "fp": 12,
+    "fn": 4,
+    "tn": 61,
+    "precision": 0.7209,
+    "recall": 0.8857,
+    "f1": 0.7949,
+    "youden_j": 0.7213
+  },
+  "best_youden_operating_point": {
+    "threshold": -1.341,
+    "tp": 32,
+    "fp": 14,
+    "fn": 3,
+    "tn": 59,
+    "precision": 0.6957,
+    "recall": 0.9143,
+    "f1": 0.7901,
+    "youden_j": 0.7225
+  },
+  "fitted_on": {
+    "collection": "msmarco_xi_demo",
+    "eval_split": "calibration",
+    "in_corpus_queries": 48,
+    "out_of_corpus_queries": 60,
+    "positives": 35,
+    "negatives": 73,
+    "languages": [
+      "hi",
+      "mr",
+      "ta",
+      "te"
+    ]
+  },
+  "model_config": {
+    "reranker_model": "BAAI/bge-reranker-v2-m3",
+    "reranker_revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+    "int8_quantized": true,
+    "device": "cpu",
+    "rerank_top_k": 30,
+    "rerank_max_length": 512
+  },
+  "warning": "Reranker logits shift with quantization/precision. Re-run this script if reranker_model, int8_quantized or device changes."
+}

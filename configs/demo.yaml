@@ -1,0 +1,46 @@
+# ===========================================================================
+# DEMO profile (default) - bounded, low-latency, multilingual demo corpus.
+# Select with INGEST_MODE=demo.
+#
+# Sized so that retrieval stays fast and a rebuild is feasible on CPU, while
+# still being large enough to show real multilingual retrieval behaviour.
+# Raising `max_rows_per_language` is the ONLY change needed to grow the corpus -
+# no application code is involved.
+# ===========================================================================
+
+dataset:
+  dataset_id: ai4bharat/MSMARCO-XI
+  # validation split: contains all 14 languages including Telugu, and streams
+  # far less data per language than the ~3.7GB train shards.
+  dataset_split: validation
+  languages: hi,mr,ta,te
+  # Sized from measured throughput, not guessed. On the CPU-only reference box
+  # (i5-1240P, no CUDA) BGE-M3 encodes ~6-8 chunks/s and each MSMARCO passage
+  # expands to ~2.85 vectors (1 native + ~1.85 sentence-window children), so:
+  #   70 rows x 4 languages ~= 2,800 passages ~= 9,000 vectors ~= 25 min.
+  # (measured expansion: 1 passage -> 3.23 vectors with native+sentence_window)
+  # It also yields ~280 labelled evaluation queries, above the 200 the benchmark
+  # harness needs.
+  # On a GPU box raise this freely - it is the only change required.
+  max_rows_per_language: 70
+
+qdrant:
+  qdrant_collection: msmarco_xi_demo
+
+chunking:
+  index_strategies: native,sentence_window,semantic_split,fixed_fallback
+
+retrieval:
+  dense_top_k: 30
+  sparse_top_k: 30
+  rrf_top_k: 30
+  rerank_top_k: 30
+  final_top_k: 5
+  enable_parent_expansion: true
+
+models:
+  embed_batch_size: 12
+  rerank_batch_size: 16
+
+guardrails:
+  enable_nli_grounding: true
