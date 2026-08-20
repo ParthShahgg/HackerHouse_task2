@@ -31,10 +31,16 @@ chunking:
   index_strategies: native,sentence_window,semantic_split,fixed_fallback
 
 retrieval:
-  dense_top_k: 30
-  sparse_top_k: 30
-  rrf_top_k: 30
-  rerank_top_k: 30
+  # Sized to the corpus and to the CPU budget, not copied from a default.
+  # With ~700 unique passages per language and final_top_k=5, pushing 30
+  # candidates through an XLM-R-large cross-encoder is wasted work: it cost
+  # ~14s/query and starved the co-located Qdrant container of CPU.
+  # 15 retrieved per branch (>= the Recall@10 measurement horizon) and 10 into
+  # the reranker. See reports/rerank_topk_ab.md for the measured A/B.
+  dense_top_k: 15
+  sparse_top_k: 15
+  rrf_top_k: 15
+  rerank_top_k: 10
   final_top_k: 5
   enable_parent_expansion: true
 

@@ -134,12 +134,22 @@ class BGEReranker:
         serving time. ``scripts/calibrate_thresholds.py`` therefore runs through
         this identical code path.
         """
+        import gc
+
         import torch
 
         try:
-            self._model = torch.quantization.quantize_dynamic(
-                self._model, {torch.nn.Linear}, dtype=torch.qint8
+            source = self._model
+            quantized = torch.quantization.quantize_dynamic(
+                source, {torch.nn.Linear}, dtype=torch.qint8
             ).eval()
+            self._model = quantized
+            # Drop the fp32 original NOW. quantize_dynamic returns a new module,
+            # so the fp32 weights (~2.27GB) stay committed until collected. On a
+            # box with ~5.5GB commit headroom that lingering copy is the
+            # difference between loading and `OSError 1455`.
+            del source
+            gc.collect()
             self.quantized = True
         except Exception as exc:  # noqa: BLE001
             # Quality/latency optimisation only - never fatal.

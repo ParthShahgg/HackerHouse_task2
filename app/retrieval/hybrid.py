@@ -173,7 +173,9 @@ class HybridRetriever:
     ) -> list[BranchHit]:
         from app.retrieval.store import DENSE_VECTOR
 
-        response = self.store.client.query_points(
+        # Via store.query_points, not store.client.query_points: the wrapper adds
+        # retry/backoff and rebuilds the connection pool after a disconnect.
+        response = self.store.query_points(
             collection_name=collection or self.collection,
             query=list(dense),
             using=DENSE_VECTOR,
@@ -205,7 +207,7 @@ class HybridRetriever:
 
         if not sparse:
             return []
-        response = self.store.client.query_points(
+        response = self.store.query_points(
             collection_name=collection or self.collection,
             query=models.SparseVector(
                 indices=list(sparse.keys()), values=[float(v) for v in sparse.values()]
@@ -258,7 +260,7 @@ class HybridRetriever:
                     filter=query_filter,
                 )
             )
-        response = self.store.client.query_points(
+        response = self.store.query_points(
             collection_name=collection or self.collection,
             prefetch=prefetch,
             query=models.FusionQuery(fusion=models.Fusion.RRF),

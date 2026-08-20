@@ -115,7 +115,13 @@ class Settings(BaseSettings):
     qdrant_collection: str = "msmarco_xi"
     qdrant_local_path: str = ".qdrant_local"
     qdrant_prefer_grpc: bool = False
-    qdrant_timeout_s: float = 10.0
+    # 60s, not 10s. On a CPU-only box the reranker saturates every core in-process,
+    # so a co-located Qdrant container can be slow to get scheduled and answer.
+    # A 10s ceiling turned that scheduling delay into a hard failure that killed a
+    # full evaluation run mid-way.
+    qdrant_timeout_s: float = 60.0
+    # Bounded retries for transient/connection-level Qdrant faults.
+    qdrant_max_retries: int = 3
 
     # ----------------------------------------------------------------- models
     embedding_model: str = "BAAI/bge-m3"

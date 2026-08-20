@@ -13,6 +13,15 @@
 
 $ErrorActionPreference = 'Continue'
 $env:TF_ENABLE_ONEDNN_OPTS = '0'
+
+# UTF-8 end to end. Without this, printing Devanagari/Tamil/Telugu to a Windows
+# console (default code page 437/1252) raises UnicodeEncodeError and aborted the
+# leakage audit mid-report. `ensure_utf8_stdout()` in app/config.py handles the
+# Python side; these two lines fix the console so the output is also *readable*.
+$env:PYTHONIOENCODING = 'utf-8'
+chcp 65001 | Out-Null
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 $py = '.\.venv\Scripts\python.exe'
 
 function Step($name, $cmd) {

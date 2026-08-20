@@ -32,14 +32,65 @@ budget is gone.
 
 from __future__ import annotations
 
+import random
+import time
 import uuid
-from collections.abc import Iterable, Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, TypeVar
 
 from app.config import get_settings
 from app.observability.tracing import get_logger
 
 logger = get_logger(__name__)
+
+T = TypeVar("T")
+
+# Substrings identifying faults that are worth retrying. "Server disconnected
+# without sending a response" is the important one: it is what httpx raises when
+# the Qdrant container goes away or drops a pooled connection mid-request, and it
+# killed a full evaluation run at query 40/92. A dropped connection is not a
+# deterministic failure, so retrying is correct - but the pooled socket is dead,
+# so the client must also be rebuilt (see `_RECONNECT_MARKERS`).
+_RETRYABLE_MARKERS = (
+    "server disconnected",
+    "remoteprotocolerror",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "cannot connect",
+    "timed out",
+    "timeout",
+    "read error",
+    "write error",
+    "temporarily unavailable",
+    "502",
+    "503",
+    "504",
+    "no route to host",
+    "broken pipe",
+    "incomplete",
+)
+
+# Faults where the existing connection pool is unusable and must be discarded.
+_RECONNECT_MARKERS = (
+    "server disconnected",
+    "remoteprotocolerror",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "cannot connect",
+    "broken pipe",
+    "read error",
+    "write error",
+)
+
+
+def _classify(exc: BaseException) -> tuple[bool, bool]:
+    """Return ``(retryable, needs_reconnect)`` for an exception."""
+    text = f"{type(exc).__name__} {exc}".lower()
+    retryable = any(marker in text for marker in _RETRYABLE_MARKERS)
+    reconnect = any(marker in text for marker in _RECONNECT_MARKERS)
+    return retryable, reconnect
 
 __all__ = [
     "DENSE_VECTOR",
@@ -81,6 +132,7 @@ class QdrantStore:
         prefer_grpc: bool | None = None,
         local_path: str | None = None,
         allow_local_fallback: bool = True,
+        max_retries: int | None = None,
     ) -> None:
         settings = get_settings()
         self.settings = settings
@@ -91,6 +143,9 @@ class QdrantStore:
         self.prefer_grpc = settings.qdrant_prefer_grpc if prefer_grpc is None else prefer_grpc
         self.local_path = local_path or settings.qdrant_local_path
         self.allow_local_fallback = allow_local_fallback
+        self.max_retries = (
+            settings.qdrant_max_retries if max_retries is None else max_retries
+        )
         self._client: Any = None
         self.using_local = False
 
@@ -137,6 +192,75 @@ class QdrantStore:
             except Exception:  # noqa: BLE001
                 pass
             self._client = None
+
+    # ------------------------------------------------------------------- retry
+    def _with_retry(
+        self,
+        operation: str,
+        func: Callable[[], T],
+        *,
+        attempts: int | None = None,
+    ) -> T:
+        """Run a Qdrant call with bounded retries and exponential backoff.
+
+        Exists because a single dropped connection should not destroy a
+        multi-hour evaluation run. Only *transient* faults are retried;
+        deterministic errors (bad collection name, dimension mismatch, malformed
+        filter) raise immediately rather than being retried three times and
+        delaying the real error by several seconds.
+
+        On a connection-level fault the client is rebuilt, because the pooled
+        socket is already dead and retrying on it would fail identically.
+        """
+        total = attempts if attempts is not None else self.max_retries
+        last: BaseException | None = None
+
+        for attempt in range(1, total + 1):
+            try:
+                return func()
+            except Exception as exc:  # noqa: BLE001
+                retryable, needs_reconnect = _classify(exc)
+                last = exc
+                if not retryable or attempt >= total:
+                    if not retryable:
+                        logger.debug(
+                            "qdrant %s failed non-transiently: %s: %s",
+                            operation, type(exc).__name__, exc,
+                        )
+                    break
+                if needs_reconnect:
+                    logger.warning(
+                        "qdrant %s: connection-level fault (%s); rebuilding client",
+                        operation, type(exc).__name__,
+                    )
+                    self.close()
+                backoff = min(0.5 * (2 ** (attempt - 1)), 8.0) + random.uniform(0, 0.3)
+                logger.warning(
+                    "qdrant %s failed (attempt %d/%d): %s: %s - retrying in %.2fs",
+                    operation, attempt, total, type(exc).__name__, exc, backoff,
+                )
+                time.sleep(backoff)
+
+        assert last is not None
+        raise last
+
+    # ------------------------------------------------------- guarded operations
+    def query_points(self, **kwargs: Any):
+        """``client.query_points`` with retry/backoff and reconnect.
+
+        All search paths (dense, sparse, server-side RRF fusion) go through here
+        so none of them can bypass the resilience policy.
+        """
+        return self._with_retry(
+            f"query_points({kwargs.get('collection_name')})",
+            lambda: self.client.query_points(**kwargs),
+        )
+
+    def retrieve_points(self, **kwargs: Any):
+        return self._with_retry(
+            f"retrieve({kwargs.get('collection_name')})",
+            lambda: self.client.retrieve(**kwargs),
+        )
 
     # -------------------------------------------------------------- collection
     def exists(self, collection: str | None = None) -> bool:
@@ -202,7 +326,11 @@ class QdrantStore:
     def count(self, collection: str | None = None, *, exact: bool = True) -> int:
         name = collection or self.collection
         try:
-            return int(self.client.count(name, exact=exact).count)
+            return int(
+                self._with_retry(
+                    f"count({name})", lambda: self.client.count(name, exact=exact)
+                ).count
+            )
         except Exception:  # noqa: BLE001
             return 0
 
@@ -261,7 +389,12 @@ class QdrantStore:
                         payload=chunk.to_payload(),
                     )
                 )
-            self.client.upsert(collection_name=name, points=points, wait=wait)
+            self._with_retry(
+                f"upsert({name}, {len(points)} pts)",
+                lambda: self.client.upsert(
+                    collection_name=name, points=points, wait=wait
+                ),
+            )
             written += len(points)
         return written
 
@@ -278,7 +411,7 @@ class QdrantStore:
         ids = [chunk_point_id(c) for c in chunk_ids]
         if not ids:
             return {}
-        records = self.client.retrieve(
+        records = self.retrieve_points(
             collection_name=collection or self.collection,
             ids=ids,
             with_payload=True,
@@ -288,7 +421,7 @@ class QdrantStore:
 
     def health(self) -> tuple[bool, str]:
         try:
-            self.client.get_collections()
+            self._with_retry("get_collections", lambda: self.client.get_collections())
             mode = "embedded" if self.using_local else "server"
             return True, f"{mode} ok"
         except Exception as exc:  # noqa: BLE001
