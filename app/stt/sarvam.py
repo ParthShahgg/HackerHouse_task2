@@ -70,6 +70,14 @@ __all__ = [
 # WebSocket close codes that justify a retry.
 _TRANSIENT_CLOSE_CODES = {1001, 1006, 1011, 1012, 1013, 1014}
 
+# Digital silence appended after the caller's audio so VAD closes the utterance
+# and the server emits its final transcript. See send_audio() for why a control
+# frame cannot be used here.
+_SILENCE_TAIL_S = 0.3
+
+# Below this, the recording is almost certainly a mis-click rather than speech.
+_MIN_AUDIO_S = 0.3
+
 
 class SarvamSTTError(RuntimeError):
     """Transcription failed. Carries whether a retry is sensible."""
@@ -193,6 +201,10 @@ class SarvamSTT:
     def _headers(self) -> dict[str, str]:
         return {"api-subscription-key": self.api_key}
 
+    def ws_query_url(self, language_code: str | None = None) -> str:
+        """Full streaming URL including query parameters."""
+        return f"{self.ws_url}?{self._ws_query(language_code)}"
+
     def _ws_query(self, language_code: str | None = None) -> str:
         from urllib.parse import urlencode
 
@@ -297,9 +309,20 @@ class SarvamSTT:
         import websockets
         from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-        url = f"{self.ws_url}?{self._ws_query(language_code)}"
+        url = f"{self.ws_query_url(language_code)}"
         state = _StreamState(segments=[])
-        encoding = "audio/wav" if is_wav else "pcm_s16le"
+
+        # ALWAYS "audio/wav" on the streaming socket, even when the payload is
+        # raw PCM (which is what the browser sends).
+        #
+        # `audio.encoding` is a strict enum server-side and accepts nothing else:
+        #   Input should be 'audio/wav' [input_value='pcm_s16le']
+        # Sending "pcm_s16le" - the honest description of the bytes - gets the
+        # frame rejected and the turn aborted, which is what left the UI hanging
+        # on "Transcribing...". Sarvam's own SDK hardcodes this literal for the
+        # same reason. Raw PCM16LE at the declared sample_rate is accepted under
+        # this label; verified against real speech in scripts/_probe_flush.py.
+        encoding = "audio/wav"
 
         try:
             async with websockets.connect(
@@ -310,27 +333,63 @@ class SarvamSTT:
                 max_size=16 * 1024 * 1024,
             ) as ws:
 
+                async def send_frame(payload: bytes) -> None:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "audio": {
+                                    "data": base64.b64encode(payload).decode("ascii"),
+                                    "encoding": encoding,
+                                    "sample_rate": self.sample_rate,
+                                }
+                            }
+                        )
+                    )
+
                 async def send_audio() -> None:
                     total = 0
                     async for chunk in audio_chunks:
                         if not chunk:
                             continue
                         total += len(chunk)
-                        await ws.send(
-                            json.dumps(
-                                {
-                                    "audio": {
-                                        "data": base64.b64encode(chunk).decode("ascii"),
-                                        "encoding": encoding,
-                                        "sample_rate": self.sample_rate,
-                                    }
-                                }
-                            )
+                        await send_frame(chunk)
+
+                    # Close the turn with a short tail of digital silence rather
+                    # than a flush control frame.
+                    #
+                    # `{"event": "flush"}` is REJECTED by this endpoint with
+                    #   "Invalid request: 'audio' must not be None."
+                    # which aborts the pipeline *before* any transcript is emitted -
+                    # the socket then just sits there, which is what made the UI
+                    # hang on "Transcribing...". Every frame must carry an `audio`
+                    # field.
+                    #
+                    # Measured on 1.29s of real Hindi speech (see
+                    # scripts/_probe_flush.py):
+                    #   silence tail  -> transcript in  647 ms
+                    #   empty audio   -> transcript in 1035 ms
+                    #   nothing sent  -> transcript in 1168 ms
+                    #   event flush   -> pipeline error, no transcript ever
+                    # The silence tail is both correct and the fastest, because it
+                    # lets VAD close the utterance immediately instead of waiting
+                    # for its own idle timer.
+                    silence = b"\x00" * int(self.sample_rate * 2 * _SILENCE_TAIL_S)
+                    frame = int(self.sample_rate * 2 * 0.1) or len(silence)
+                    for offset in range(0, len(silence), frame):
+                        await send_frame(silence[offset : offset + frame])
+
+                    logger.info(
+                        "sent %d audio bytes (%.2fs) + %.0fms silence tail",
+                        total,
+                        total / float(self.sample_rate * 2),
+                        _SILENCE_TAIL_S * 1000,
+                    )
+                    if total < self.sample_rate * 2 * _MIN_AUDIO_S:
+                        logger.warning(
+                            "only %d audio bytes received (<%.1fs) - the client may "
+                            "have stopped recording almost immediately",
+                            total, _MIN_AUDIO_S,
                         )
-                    # Force the server to emit a final transcript instead of
-                    # waiting on VAD silence detection - materially lowers TTFT.
-                    await ws.send(json.dumps({"event": "flush"}))
-                    logger.debug("sent %d audio bytes + flush", total)
 
                 sender = asyncio.create_task(send_audio())
                 try:
@@ -421,6 +480,23 @@ class SarvamSTT:
                 continue
             kind = message.get("type") or message.get("event") or ""
             data = message.get("data") if isinstance(message.get("data"), dict) else message
+
+            # Server-side pipeline errors were previously ignored, so a rejected
+            # frame left this loop waiting for a transcript that would never
+            # arrive - the socket hung until the read timeout and the UI sat on
+            # "Transcribing...". Surface them so the retry/REST-fallback logic can
+            # actually engage.
+            if kind == "error" or data.get("error"):
+                detail = str(
+                    data.get("message") or data.get("error") or "unknown Sarvam error"
+                )
+                logger.error("Sarvam pipeline error: %s", detail)
+                raise SarvamSTTError(
+                    f"Sarvam rejected the stream: {detail}",
+                    # Malformed-request errors are deterministic; retrying the
+                    # socket would fail identically. Fall straight through to REST.
+                    transient=False,
+                )
 
             if kind in ("events", "speech_start", "speech_end"):
                 signal = str(data.get("signal_type", kind)).upper()

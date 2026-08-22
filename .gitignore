@@ -25,6 +25,12 @@ htmlcov/
 .cache/
 .hf_cache/
 .qdrant_storage/
+# Embedded-Qdrant working dir. A committed .lock here makes the embedded client
+# refuse to open with "already accessed by another instance".
+.qdrant_local/
+
+# ---- local runtime state (per-machine, not source) ----
+data/feedback/
 
 # ---- generated corpus + eval artifacts ----
 data/corpus/

@@ -36,7 +36,10 @@ retrieval:
   # candidates through an XLM-R-large cross-encoder is wasted work: it cost
   # ~14s/query and starved the co-located Qdrant container of CPU.
   # 15 retrieved per branch (>= the Recall@10 measurement horizon) and 10 into
-  # the reranker. See reports/rerank_topk_ab.md for the measured A/B.
+  # the reranker. Reproduce the A/B with:
+  #   powershell -File scripts/ab_rerank_topk.ps1
+  # NOTE: .env overrides this file, so DENSE/SPARSE/RRF/RERANK_TOP_K must be
+  # kept in sync there too or this profile has no effect.
   dense_top_k: 15
   sparse_top_k: 15
   rrf_top_k: 15

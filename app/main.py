@@ -21,7 +21,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
@@ -135,13 +135,57 @@ async def unhandled_exception_handler(request, exc: Exception) -> JSONResponse:
 # Frontend (served from the same origin so the browser needs no CORS or config)
 # ---------------------------------------------------------------------------
 if FRONTEND_DIR.exists():
-    app.mount(
-        "/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static"
-    )
+    _NO_STORE = {
+        # The frontend is edited during development and served from the same
+        # origin. A cached app.js paired with a newer index.html produces a page
+        # that silently does nothing (listeners never attach, the form falls back
+        # to a native GET submit). Never cache these.
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
+    class _NoCacheStatic(StaticFiles):
+        def is_not_modified(self, response_headers, request_headers) -> bool:  # noqa: D102
+            # Defeat 304 revalidation so a stale script can't be reused.
+            return False
+
+        def file_response(self, *args, **kwargs):  # noqa: D102
+            response = super().file_response(*args, **kwargs)
+            response.headers.update(_NO_STORE)
+            return response
+
+    app.mount("/static", _NoCacheStatic(directory=str(FRONTEND_DIR)), name="static")
+
+    def _asset_fingerprint(name: str) -> str:
+        """Short content hash of a frontend asset, or 'dev' if unreadable."""
+        import hashlib
+
+        try:
+            return hashlib.sha256((FRONTEND_DIR / name).read_bytes()).hexdigest()[:12]
+        except OSError:
+            return "dev"
 
     @app.get("/", include_in_schema=False)
-    def index() -> FileResponse:
-        return FileResponse(str(FRONTEND_DIR / "index.html"))
+    def index() -> HTMLResponse:
+        """Serve index.html with content-hashed asset URLs.
+
+        `no-store` stops the browser caching assets *from now on*, but it cannot
+        evict a copy cached BEFORE that header existed - and that stale copy is
+        reused until the user happens to hard-reload. A corrupted app.js kept
+        resurfacing for exactly this reason.
+
+        Rewriting the asset URLs to `app.js?v=<content-hash>` makes the fix
+        independent of browser cache behaviour: index.html itself is no-store, so
+        it is always re-fetched, and any change to app.js yields a URL the browser
+        has never seen and therefore cannot serve from cache.
+        """
+        html = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+        for asset in ("app.js", "styles.css"):
+            html = html.replace(
+                f"/static/{asset}", f"/static/{asset}?v={_asset_fingerprint(asset)}"
+            )
+        return HTMLResponse(content=html, headers=_NO_STORE)
 
 
 def main() -> None:

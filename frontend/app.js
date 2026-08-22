@@ -93,6 +93,21 @@ function clearError() {
     ui.errorBox.hidden = true;
 }
 
+/* Surface any uncaught JS error in the UI.
+ *
+ * Without this, one script error leaves the page merely looking unresponsive:
+ * listeners never attach, the form falls back to a native GET submit (the URL
+ * gains a "?"), the debug panel stays all dashes, and nothing says why. That is
+ * exactly what a corrupted nullish-coalescing operator caused here. */
+window.addEventListener('error', function (e) {
+    showError('Page script error: ' + e.message +
+              ' (' + (e.filename || 'app.js') + ':' + (e.lineno || 0) + ')');
+});
+window.addEventListener('unhandledrejection', function (e) {
+    var reason = e && e.reason;
+    showError('Unhandled error: ' + ((reason && reason.message) || reason));
+});
+
 function setBusy(busy) {
     ui.sendBtn.disabled = busy;
     ui.sendBtn.textContent = busy ? 'Working…' : 'Ask';
@@ -582,7 +597,13 @@ function stopRecording() {
 ui.textForm.addEventListener('submit', (event) => {
     event.preventDefault();
     const query = ui.textInput.value.trim();
-    if (query) askText(query, ui.langSelect.value);
+    if (!query) {
+        // Previously a silent no-op, indistinguishable from a broken app.
+        showError('Type a question first (or pick one of the examples below).');
+        ui.textInput.focus();
+        return;
+    }
+    askText(query, ui.langSelect.value);
 });
 
 document.querySelectorAll('.chip').forEach((chip) => {
