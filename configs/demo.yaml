@@ -12,7 +12,7 @@ dataset:
   dataset_id: ai4bharat/MSMARCO-XI
   # validation split: contains all 14 languages including Telugu, and streams
   # far less data per language than the ~3.7GB train shards.
-  dataset_split: validation
+  dataset_split: validation 
   languages: hi,mr,ta,te
   # Sized from measured throughput, not guessed. On the CPU-only reference box
   # (i5-1240P, no CUDA) BGE-M3 encodes ~6-8 chunks/s and each MSMARCO passage

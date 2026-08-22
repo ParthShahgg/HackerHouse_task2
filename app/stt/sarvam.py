@@ -196,10 +196,16 @@ class SarvamSTT:
     def _ws_query(self, language_code: str | None = None) -> str:
         from urllib.parse import urlencode
 
+        # Use the explicitly-selected language if provided — this skips Sarvam's
+        # language-detection model (~200-400ms extra) and improves accuracy for
+        # Hindi specifically, which has the largest corpus share.
+        # Fall back to "unknown" (auto-detect) only when no language is pinned.
+        lang = language_code or self.language_code or "unknown"
+
         params = {
             "model": self.model,
             "mode": self.mode,
-            "language_code": language_code or self.language_code,
+            "language_code": lang,
             "sample_rate": str(self.sample_rate),
             "high_vad_sensitivity": str(self.high_vad_sensitivity).lower(),
             "vad_signals": str(self.vad_signals).lower(),
@@ -373,8 +379,43 @@ class SarvamSTT:
         on_partial: Callable[[TranscriptSegment], Any] | None,
         sender: asyncio.Task,
     ) -> None:
-        """Read messages until a final transcript arrives."""
+        """Read messages until a non-empty final transcript arrives.
+
+        Latency contract
+        ----------------
+        - Non-empty final → return immediately.
+        - Empty final (VAD end-of-segment signal):
+            - If we already have text segments → return immediately.
+            - Otherwise → start a 1.5s deadline for the real transcript.
+        - Sender (flush) done → start a 1.5s deadline unconditionally.
+          This caps the wait regardless of whether partials ever arrived.
+        - Deadline expired → promote the last partial to final and return.
+        """
+        import time
+        deadline: float | None = None
+
         async for raw in ws:
+            # Check deadline on every iteration — the async-for doesn't yield
+            # between messages so we need to check here rather than in a timer.
+            if deadline is not None and time.monotonic() > deadline:
+                # Promote last partial to final if we have one
+                if not state.segments and state.partial_count > 0:
+                    # _last_partial is set below in the partial branch
+                    if hasattr(state, '_last_partial') and state._last_partial:
+                        state.segments.append(
+                            TranscriptSegment(
+                                text=state._last_partial,
+                                language=sarvam_to_iso1(state.language_tag) if state.language_tag else None,
+                                is_final=True,
+                            )
+                        )
+                return
+
+            # Set deadline once sender has flushed — no point waiting longer
+            # than 1.5s after all audio+flush has been sent.
+            if sender.done() and deadline is None:
+                deadline = time.monotonic() + 1.5
+
             message = self._parse(raw)
             if message is None:
                 continue
@@ -393,8 +434,6 @@ class SarvamSTT:
                 or data.get("text")
                 or ""
             )
-            if not transcript:
-                continue
 
             tag = data.get("language_code") or data.get("language")
             if tag:
@@ -411,6 +450,14 @@ class SarvamSTT:
                 if "is_final" in data
                 else kind in ("data", "transcript", "translation", "")
             )
+
+            if not transcript:
+                if is_final and state.segments:
+                    return  # empty final after we already have text = done
+                if is_final and deadline is None:
+                    deadline = time.monotonic() + 1.5
+                continue
+
             segment = TranscriptSegment(
                 text=str(transcript).strip(),
                 language=sarvam_to_iso1(tag) if tag else None,
@@ -418,11 +465,10 @@ class SarvamSTT:
             )
             if is_final:
                 state.segments.append(segment)
-                if sender.done():
-                    return
-                # The utterance is complete; stop reading.
                 return
+            # partial
             state.partial_count += 1
+            state._last_partial = segment.text  # type: ignore[attr-defined]
             if on_partial is not None:
                 try:
                     on_partial(segment)

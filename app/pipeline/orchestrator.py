@@ -157,6 +157,7 @@ class RAGOrchestrator:
         *,
         audio_stream: AsyncIterator[bytes] | None = None,
         language: str | None = None,
+        sarvam_language: str | None = None,
         is_wav: bool = True,
         transcript_override: str | None = None,
         top_k: int | None = None,
@@ -179,19 +180,25 @@ class RAGOrchestrator:
                 )
                 ctx.latency.stt_latency = None
             else:
+                # sarvam_language is the BCP-47 pin (e.g. "hi-IN") sent from the
+                # frontend when the user selects a language explicitly. Passing it
+                # to Sarvam skips the auto-detection model (~200-400ms saving).
+                # Falls back to language (ISO-639-1) which the STT client maps to
+                # the correct Sarvam tag, or None for full auto-detect.
+                stt_lang = sarvam_language or language
                 try:
                     with Stopwatch(ctx.latency, "stt_latency"):
                         if audio_stream is not None:
                             ctx.stt = await self.stt.transcribe_stream(
                                 audio_stream,
-                                language_code=language,
+                                language_code=stt_lang,
                                 is_wav=is_wav,
                                 on_partial=on_partial,
                             )
                         else:
                             ctx.stt = await self.stt.transcribe_bytes(
                                 audio or b"",
-                                language_code=language,
+                                language_code=stt_lang,
                                 is_wav=is_wav,
                                 on_partial=on_partial,
                             )

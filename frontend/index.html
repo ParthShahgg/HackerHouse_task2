@@ -13,16 +13,15 @@
 
     <header class="topbar">
         <div class="brand">
-            <span class="logo" aria-hidden="true">◑</span>
             <div>
                 <h1>Voice RAG</h1>
-                <p class="sub">Grounded multilingual retrieval over <code>ai4bharat/MSMARCO-XI</code></p>
+                <p class="sub">Multilingual retrieval over <code>ai4bharat/MSMARCO-XI</code></p>
             </div>
         </div>
         <div class="status-cluster">
             <span id="health-pill" class="pill pill-muted" role="status" aria-live="polite">checking…</span>
             <button id="debug-toggle" class="btn btn-ghost" aria-expanded="false" aria-controls="debug-drawer">
-                Developer
+                Debug
             </button>
         </div>
     </header>
@@ -30,12 +29,41 @@
     <main id="main">
         <!-- ── Ask ─────────────────────────────────────────────── -->
         <section class="card" aria-labelledby="ask-h">
-            <h2 id="ask-h">Ask a question</h2>
+            <div class="card-head">
+                <h2 id="ask-h">Ask</h2>
+                <label class="lang-select">
+                    <span>Language</span>
+                    <select id="lang-select">
+                        <option value="">Auto-detect</option>
+                        <option value="hi">Hindi</option>
+                        <option value="mr">Marathi</option>
+                        <option value="ta">Tamil</option>
+                        <option value="te">Telugu</option>
+                    </select>
+                </label>
+            </div>
+
+            <form id="text-form" class="text-row">
+                <label class="sr-only" for="text-input">Your question</label>
+                <input id="text-input" type="text" autocomplete="off"
+                    placeholder="मैनहट्टन परियोजना का क्या प्रभाव पड़ा?" />
+                <button id="send-btn" class="btn btn-primary" type="submit">Ask</button>
+            </form>
+
+            <div class="examples" aria-label="Example questions">
+                <button class="chip" data-lang="hi">मैनहट्टन परियोजना का क्या प्रभाव पड़ा?</button>
+                <button class="chip" data-lang="hi">लिफ्ट का मतलब है</button>
+                <button class="chip" data-lang="mr">मॅनहॅटन प्रकल्पाचा काय परिणाम झाला?</button>
+                <button class="chip" data-lang="ta">மன்ஹாட்டன் திட்டத்தின் விளைவு என்ன?</button>
+                <button class="chip" data-lang="te">కార్పొరేషన్ అంటే ఏమిటి?</button>
+            </div>
+
+            <div class="divider"><span>or speak</span></div>
 
             <div class="mic-row">
                 <button id="mic-btn" class="mic" aria-label="Start recording">
                     <span class="mic-icon" aria-hidden="true">
-                        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" focusable="false">
+                        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" focusable="false">
                             <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" />
                             <path d="M17.3 12a5.3 5.3 0 0 1-10.6 0H5a7 7 0 0 0 6 6.9V22h2v-3.1A7 7 0 0 0 19 12z" />
                         </svg>
@@ -48,37 +76,10 @@
                     <div class="level-track" aria-hidden="true">
                         <div id="level-bar" class="level-bar"></div>
                     </div>
-                    <label class="lang-select">
-                        <span>Language</span>
-                        <select id="lang-select">
-                            <option value="">Auto-detect</option>
-                            <option value="hi">Hindi</option>
-                            <option value="mr">Marathi</option>
-                            <option value="ta">Tamil</option>
-                            <option value="te">Telugu</option>
-                            <option value="en">English</option>
-                        </select>
-                    </label>
                 </div>
             </div>
 
             <div id="mic-warning" class="notice notice-warn" hidden></div>
-
-            <div class="divider"><span>or type</span></div>
-
-            <form id="text-form" class="text-row">
-                <label class="sr-only" for="text-input">Your question</label>
-                <input id="text-input" type="text" autocomplete="off" placeholder="कॉर्पोरेशन क्या है?  /  महामंडळ काय आहे?  /  What is a corporation?" />
-                <button id="send-btn" class="btn btn-primary" type="submit">Ask</button>
-            </form>
-
-            <div class="examples" aria-label="Example questions">
-                <button class="chip" data-lang="hi">कॉर्पोरेशन क्या है?</button>
-                <button class="chip" data-lang="mr">महामंडळ काय आहे?</button>
-                <button class="chip" data-lang="ta">நிறுவனம் என்றால் என்ன?</button>
-                <button class="chip" data-lang="te">కార్పొరేషన్ అంటే ఏమిటి?</button>
-                <button class="chip" data-lang="">Who won the 2027 Mars marathon?</button>
-            </div>
         </section>
 
         <!-- ── Transcript ───────────────────────────────────────── -->
@@ -101,7 +102,7 @@
             </div>
 
             <div id="abstain-note" class="notice notice-abstain" hidden>
-                <strong>No answer given.</strong>
+                <strong>No answer.</strong>
                 <span id="abstain-reason"></span>
             </div>
 
@@ -113,10 +114,10 @@
             </div>
 
             <div class="feedback" id="feedback" hidden>
-                <span class="muted">Was this useful?</span>
-                <button class="btn btn-ghost" data-rating="up" aria-label="Helpful">👍</button>
-                <button class="btn btn-ghost" data-rating="down" aria-label="Not helpful">👎</button>
-                <span id="feedback-ack" class="muted" aria-live="polite"></span>
+                <span class="muted small">Useful?</span>
+                <button class="btn btn-ghost btn-sm" data-rating="up" aria-label="Helpful">👍</button>
+                <button class="btn btn-ghost btn-sm" data-rating="down" aria-label="Not helpful">👎</button>
+                <span id="feedback-ack" class="muted small" aria-live="polite"></span>
             </div>
         </section>
 
@@ -126,8 +127,8 @@
     <!-- ── Developer drawer ───────────────────────────────────── -->
     <aside id="debug-drawer" class="drawer" aria-label="Developer details" hidden>
         <div class="drawer-head">
-            <h2>Developer</h2>
-            <button id="debug-close" class="btn btn-ghost" aria-label="Close developer panel">✕</button>
+            <h2>Debug</h2>
+            <button id="debug-close" class="btn btn-ghost" aria-label="Close debug panel">✕</button>
         </div>
 
         <div class="drawer-body">
@@ -169,12 +170,12 @@
             <table class="tbl">
                 <tbody id="d-timings"></tbody>
             </table>
-            <p class="muted small"><code>n/a</code> = not measured (never rendered as 0).</p>
+            <p class="muted small"><code>n/a</code> = not measured.</p>
 
             <h3>Pipeline path</h3>
             <div id="d-path" class="path"></div>
 
-            <h3>Candidates <span class="muted small">(reranker scores)</span></h3>
+            <h3>Candidates</h3>
             <div class="tbl-wrap">
                 <table class="tbl">
                     <thead>

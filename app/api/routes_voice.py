@@ -116,8 +116,9 @@ async def voice_stream(websocket: WebSocket) -> None:
     trace = Trace()
     orchestrator = orchestrator_dep()
 
-    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=256)
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=512)
     config: dict = {}
+    config_ready = asyncio.Event()
     loop = asyncio.get_running_loop()
 
     async def receive_loop() -> None:
@@ -137,6 +138,7 @@ async def voice_stream(websocket: WebSocket) -> None:
                     event = parsed.get("event")
                     if event == "config":
                         config.update(parsed)
+                        config_ready.set()
                     elif event in ("end", "flush", "stop"):
                         break
         except (WebSocketDisconnect, RuntimeError):
@@ -152,8 +154,6 @@ async def voice_stream(websocket: WebSocket) -> None:
             yield chunk
 
     def on_partial(segment: TranscriptSegment) -> None:
-        # Called from the STT consumer; schedule the send on the loop so the
-        # callback never blocks socket reading.
         with contextlib.suppress(Exception):
             loop.create_task(
                 websocket.send_json({"type": "partial", "text": segment.text})
@@ -163,15 +163,18 @@ async def voice_stream(websocket: WebSocket) -> None:
     try:
         await websocket.send_json({"type": "ready", "trace_id": trace.trace_id})
 
-        # Wait briefly for the config frame so the language hint is honoured.
-        for _ in range(50):
-            if config:
-                break
-            await asyncio.sleep(0.01)
+        # Wait for the config frame with a hard 300ms cap.
+        # The old approach polled with 50 × 10ms sleeps (500ms worst case).
+        # asyncio.Event wakes up the instant the frame arrives.
+        try:
+            await asyncio.wait_for(config_ready.wait(), timeout=0.3)
+        except asyncio.TimeoutError:
+            logger.warning("voice stream: config frame not received within 300ms, proceeding without language hint")
 
         response = await orchestrator.run_voice(
             audio_stream=audio_iter(),
             language=normalize_language(config.get("language")),
+            sarvam_language=config.get("sarvam_language"),
             is_wav=bool(config.get("is_wav", False)),
             include_debug=bool(config.get("include_debug", False)),
             on_partial=on_partial,

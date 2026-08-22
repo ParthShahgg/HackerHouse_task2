@@ -1,17 +1,21 @@
 /* Voice RAG frontend.
  *
- * Audio: Sarvam's streaming API accepts WAV or raw PCM only - not the WebM/Opus
- * that MediaRecorder produces by default. So we capture via the Web Audio API,
- * downsample to 16 kHz and send 16-bit little-endian PCM frames. That avoids a
- * server-side transcode on the latency-critical path.
+ * Audio path:
+ *   getUserMedia → AudioContext → AudioWorklet (falls back to ScriptProcessor)
+ *   → downsample to 16 kHz PCM16-LE → WebSocket → server → Sarvam
  *
- * No API keys exist in this file. All credentials stay server-side; the browser
- * only ever talks to this app's own origin.
+ * We target ~100ms send intervals (1600 samples × 1 ch × 2 bytes = 3.2 kB/frame)
+ * rather than the old 2048-sample ScriptProcessor frames (~42ms at 48kHz, ~128ms
+ * at 16kHz) which caused audible glitching and deprecation warnings.
+ *
+ * No API keys here. All credentials stay server-side.
  */
 'use strict';
 
 const TARGET_SR = 16000;
-const FRAME_SAMPLES = 2048;
+// How many 16kHz samples to accumulate before sending one PCM frame.
+// 1600 = exactly 100ms at 16kHz — matches Sarvam's recommended chunk size.
+const SEND_SAMPLES = 1600;
 
 const el = (id) => document.getElementById(id);
 
@@ -77,7 +81,7 @@ function fmt(v, digits = 1) {
 }
 
 function setText(node, value) {
-    node.textContent = value ? ? '—';
+    node.textContent = value ?? '—';
 }
 
 function showError(message) {
@@ -92,7 +96,6 @@ function clearError() {
 function setBusy(busy) {
     ui.sendBtn.disabled = busy;
     ui.sendBtn.textContent = busy ? 'Working…' : 'Ask';
-    if (busy) ui.recState.textContent = 'Running pipeline…';
 }
 
 /* ── health ──────────────────────────────────────────────── */
@@ -153,7 +156,6 @@ function renderLanguage(code) {
         mr: 'Marathi',
         ta: 'Tamil',
         te: 'Telugu',
-        en: 'English',
         bn: 'Bengali',
         gu: 'Gujarati',
         kn: 'Kannada',
@@ -163,7 +165,7 @@ function renderLanguage(code) {
         as: 'Assamese',
         ur: 'Urdu',
         ne: 'Nepali',
-        sa: 'Sanskrit'
+        sa: 'Sanskrit',
     };
     ui.langBadge.hidden = false;
     ui.langBadge.textContent = `detected: ${names[code] || code} (${code})`;
@@ -306,7 +308,7 @@ function renderDebug(data) {
         if (i === 0) tr.className = 'top-hit';
         [
             String(i + 1), c.chunk_id, c.strategy,
-            c.dense_rank ? ? '—', c.sparse_rank ? ? '—',
+            c.dense_rank ?? '—', c.sparse_rank ?? '—',
             fmt(c.fused_score, 4), fmt(c.rerank_score, 3),
         ].forEach((value, idx) => {
             const td = document.createElement('td');
@@ -331,6 +333,7 @@ function renderDebug(data) {
 async function askText(query, language) {
     clearError();
     setBusy(true);
+    ui.recState.textContent = 'Retrieving…';
     ui.answerCard.hidden = true;
     renderTranscript(query, false);
     renderLanguage(language || null);
@@ -359,41 +362,85 @@ async function askText(query, language) {
     }
 }
 
-/* ── microphone streaming ────────────────────────────────── */
+/* ── audio helpers ───────────────────────────────────────── */
+
+/**
+ * Box-average downsample from inputRate → TARGET_SR, return Int16Array.
+ * Box averaging is cheap anti-aliasing — avoids aliasing high frequencies
+ * into the 0–8kHz voice band that nearest-neighbour picking would cause.
+ */
 function downsampleToPCM16(input, inputRate) {
     const ratio = inputRate / TARGET_SR;
     const outLength = Math.floor(input.length / ratio);
     const out = new Int16Array(outLength);
     for (let i = 0; i < outLength; i++) {
-        // Box-average the source window: cheap anti-aliasing, better than
-        // nearest-neighbour picking which aliases high frequencies into the voice band.
         const start = Math.floor(i * ratio);
         const end = Math.min(Math.floor((i + 1) * ratio), input.length);
-        let sum = 0,
-            count = 0;
-        for (let j = start; j < end; j++) {
-            sum += input[j];
-            count++;
-        }
-        const sample = count ? sum / count : input[start] || 0;
-        const clamped = Math.max(-1, Math.min(1, sample));
-        out[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+        let sum = 0, count = 0;
+        for (let j = start; j < end; j++) { sum += input[j]; count++; }
+        const s = count ? sum / count : (input[start] || 0);
+        const c = Math.max(-1, Math.min(1, s));
+        out[i] = c < 0 ? c * 0x8000 : c * 0x7fff;
     }
     return out;
 }
 
+/**
+ * Worklet processor source — inlined as a Blob URL so we don't need a
+ * separate file on the server. Accumulates samples until SEND_SAMPLES are
+ * ready, then posts them as a Float32Array to the main thread.
+ * Using AudioWorklet avoids the ScriptProcessor deprecation and runs off the
+ * audio thread (no glitches from main-thread GC pauses).
+ */
+const WORKLET_SRC = `
+class PcmSender extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._buf = [];
+    this._count = 0;
+    this._limit = ${SEND_SAMPLES};
+  }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this._buf.push(ch[i]);
+      this._count++;
+      if (this._count >= this._limit) {
+        this.port.postMessage(new Float32Array(this._buf));
+        this._buf = [];
+        this._count = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-sender', PcmSender);
+`;
+
+let workletUrl = null;
+function getWorkletUrl() {
+    if (!workletUrl) {
+        workletUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+    }
+    return workletUrl;
+}
+
+/* ── microphone streaming ────────────────────────────────── */
+
 async function startRecording() {
     if (recording || !sttAvailable) return;
     clearError();
+
+    // 1. Get mic permission first — before opening the WebSocket.
+    //    The old code opened the socket and then asked for permission; if the
+    //    user took >500ms to accept the browser dialog, the server-side config
+    //    wait loop expired and language hints were silently dropped.
     try {
         mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true
-            },
+            audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, sampleRate: TARGET_SR },
         });
-    } catch (err) {
+    } catch {
         showError('Microphone permission denied or unavailable.');
         return;
     }
@@ -402,18 +449,27 @@ async function startRecording() {
     ui.micBtn.classList.add('recording');
     ui.micBtn.setAttribute('aria-label', 'Stop recording');
     ui.micLabel.textContent = 'Listening…';
-    ui.recState.textContent = 'Recording — release to send';
+    ui.recState.textContent = 'Recording';
     ui.answerCard.hidden = true;
     ui.transcript.textContent = '';
+    ui.transcriptCard.hidden = false;
 
+    // 2. Open WebSocket now that we have audio ready.
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     socket = new WebSocket(`${proto}://${location.host}/api/voice/stream`);
     socket.binaryType = 'arraybuffer';
 
     socket.onopen = () => {
+        // Pass the selected language so Sarvam skips its auto-detection model.
+        // "unknown" triggers detection (~200-400ms extra); a pinned language code
+        // (hi-IN, mr-IN, etc.) skips it entirely.
+        const langMap = { hi: 'hi-IN', mr: 'mr-IN', ta: 'ta-IN', te: 'te-IN' };
+        const selected = ui.langSelect.value;
+        const sarvamLang = langMap[selected] || null; // null → server uses "unknown"
         socket.send(JSON.stringify({
             event: 'config',
-            language: ui.langSelect.value || null,
+            language: selected || null,      // ISO-639-1 for the RAG pipeline
+            sarvam_language: sarvamLang,     // BCP-47 for Sarvam STT (optional field, server ignores if missing)
             is_wav: false,
             include_debug: true,
         }));
@@ -421,49 +477,83 @@ async function startRecording() {
 
     socket.onmessage = (event) => {
         let msg;
-        try {
-            msg = JSON.parse(event.data);
-        } catch {
-            return;
-        }
+        try { msg = JSON.parse(event.data); } catch { return; }
         if (msg.type === 'partial') {
             renderTranscript(msg.text, true);
             ui.recState.textContent = 'Transcribing…';
         } else if (msg.type === 'transcript') {
             renderTranscript(msg.text, false);
             renderLanguage(msg.language);
+            ui.recState.textContent = 'Retrieving…';
         } else if (msg.type === 'answer') {
             renderAnswer(msg);
             setBusy(false);
             ui.recState.textContent = 'Idle';
         } else if (msg.type === 'error') {
-            showError(msg.detail || 'Voice pipeline failed.');
+            // stt_auth errors come through here — give a clearer message
+            const detail = msg.detail || 'Voice pipeline failed.';
+            const friendly = msg.code === 'stt_auth'
+                ? 'STT credentials missing or rejected. Check SARVAM_API_KEY.'
+                : detail;
+            showError(friendly);
             setBusy(false);
             ui.recState.textContent = 'Idle';
         }
     };
-    socket.onerror = () => showError('Voice WebSocket error.');
 
-    audioCtx = new(window.AudioContext || window.webkitAudioContext)();
-    sourceNode = audioCtx.createMediaStreamSource(mediaStream);
-    procNode = audioCtx.createScriptProcessor(FRAME_SAMPLES, 1, 1);
-
-    procNode.onaudioprocess = (event) => {
-        if (!recording) return;
-        const input = event.inputBuffer.getChannelData(0);
-
-        let peak = 0;
-        for (let i = 0; i < input.length; i++) peak = Math.max(peak, Math.abs(input[i]));
-        ui.levelBar.style.width = `${Math.min(100, peak * 180)}%`;
-
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            const pcm = downsampleToPCM16(input, audioCtx.sampleRate);
-            socket.send(pcm.buffer);
-        }
+    socket.onerror = () => {
+        if (recording) showError('WebSocket error — check the server is running.');
     };
 
-    sourceNode.connect(procNode);
-    procNode.connect(audioCtx.destination);
+    // 3. Set up the audio graph. Try AudioWorklet first (modern, non-deprecated).
+    //    Fall back to ScriptProcessor if the browser doesn't support it.
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // Resume in case autoplay policy suspended it
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+
+    const nativeRate = audioCtx.sampleRate;
+
+    try {
+        await audioCtx.audioWorklet.addModule(getWorkletUrl());
+        const workletNode = new AudioWorkletNode(audioCtx, 'pcm-sender');
+        workletNode.port.onmessage = (e) => {
+            if (!recording) return;
+            const f32 = e.data;
+            // level meter + speaking indicator
+            let peak = 0;
+            for (let i = 0; i < f32.length; i++) peak = Math.max(peak, Math.abs(f32[i]));
+            ui.levelBar.style.width = `${Math.min(100, peak * 180)}%`;
+            if (peak > 0.01) ui.recState.textContent = 'Speaking…';
+            // send PCM
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                const pcm = downsampleToPCM16(f32, nativeRate);
+                socket.send(pcm.buffer);
+            }
+        };
+        sourceNode.connect(workletNode);
+        // Store on procNode slot so stopRecording can disconnect it
+        procNode = workletNode;
+    } catch {
+        // Worklet unavailable — fall back to deprecated ScriptProcessor.
+        // Buffer size 4096 at ~48kHz = ~85ms per callback, close enough to
+        // the 100ms target without the 2048-sample (42ms) choppiness.
+        procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+        procNode.onaudioprocess = (ev) => {
+            if (!recording) return;
+            const input = ev.inputBuffer.getChannelData(0);
+            let peak = 0;
+            for (let i = 0; i < input.length; i++) peak = Math.max(peak, Math.abs(input[i]));
+            ui.levelBar.style.width = `${Math.min(100, peak * 180)}%`;
+            if (peak > 0.01) ui.recState.textContent = 'Speaking…';
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                const pcm = downsampleToPCM16(input, nativeRate);
+                socket.send(pcm.buffer);
+            }
+        };
+        sourceNode.connect(procNode);
+        procNode.connect(audioCtx.destination);
+    }
 }
 
 function stopRecording() {
@@ -472,30 +562,19 @@ function stopRecording() {
     ui.micBtn.classList.remove('recording');
     ui.micBtn.setAttribute('aria-label', 'Start recording');
     ui.micLabel.textContent = 'Hold to speak';
-    ui.recState.textContent = 'Processing…';
+    ui.recState.textContent = 'Transcribing…';
     ui.levelBar.style.width = '0%';
     setBusy(true);
 
     try {
-        if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
-            event: 'end'
-        }));
-    } catch {}
-    try {
-        if (procNode) {
-            procNode.disconnect();
-            procNode.onaudioprocess = null;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ event: 'end' }));
         }
     } catch {}
-    try {
-        if (sourceNode) sourceNode.disconnect();
-    } catch {}
-    try {
-        if (audioCtx) audioCtx.close();
-    } catch {}
-    try {
-        if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
-    } catch {}
+    try { if (procNode) { procNode.disconnect(); procNode.onaudioprocess = null; } } catch {}
+    try { if (sourceNode) sourceNode.disconnect(); } catch {}
+    try { if (audioCtx) audioCtx.close(); } catch {}
+    try { if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop()); } catch {}
     audioCtx = sourceNode = procNode = mediaStream = null;
 }
 
@@ -508,9 +587,11 @@ ui.textForm.addEventListener('submit', (event) => {
 
 document.querySelectorAll('.chip').forEach((chip) => {
     chip.addEventListener('click', () => {
-        ui.textInput.value = chip.textContent;
-        ui.langSelect.value = chip.dataset.lang || '';
-        askText(chip.textContent, chip.dataset.lang || '');
+        const q = chip.textContent.trim();
+        const lang = chip.dataset.lang || '';
+        ui.textInput.value = q;
+        ui.langSelect.value = lang;
+        askText(q, lang);
     });
 });
 
